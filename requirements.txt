@@ -1,0 +1,17 @@
+pymupdf4llm
+pymupdf
+python-dotenv
+streamlit
+transformers
+sentence-transformers
+torch
+pinecone
+requests
+tqdm
+fastapi
+uvicorn
+python-multipart
+requests
+redis
+ollama
+
