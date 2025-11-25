@@ -73,7 +73,7 @@ git clone <repo_url>
 cd Talk-to-PDF
 ```
 
-# Create virtual environment
+### Create virtual environment
 
 ```bash
 python -m venv venv
@@ -81,11 +81,13 @@ source venv/bin/activate  # Linux/macOS
 venv\Scripts\activate     # Windows
 ```
 
-# Install dependencies
+### Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
+
+### Add
 
 #Ingest the PDF first
 
@@ -93,13 +95,13 @@ pip install -r requirements.txt
 python .\ingestion\pipeline.py
 ```
 
-# Start FastAPI backend
+### Start FastAPI backend
 
 ```bash
 uvicorn main:app --reload
 ```
 
-# Start Streamlit frontend
+### Start Streamlit frontend
 
 ```bash
 streamlit run app.py
@@ -111,11 +113,15 @@ streamlit run app.py
 
 - Run Ingest istruction to ingest the input pdf andstore embeddings in Pinecone.
 
-- Ask a Question
+- Open StreamLit for the chat function or see the MLM demo.
 
-- Enter your question in the text input.
+- Chat Function
 
-- Click Get Answer to retrieve the answer using the RAG pipeline.
+  - Enter your question in the text input.
+
+  - Click Get Answer to retrieve the answer using the RAG pipeline.
+
+  -
 
 - MLM Demo
 
