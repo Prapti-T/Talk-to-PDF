@@ -26,10 +26,6 @@ class QAModel:
         # Ollama LLM
         self.ollama_model = ollama_model
 
-        # constants
-        self.MAX_BERT_TOKENS = 512
-        self.RESERVED_TOKENS = 4  # [CLS], [SEP], etc
-
     # Redis chat utilities
     def _save_conversation(self, session_id: str, user_input: str, answer: str):
         if self.redis_enabled:
@@ -76,26 +72,10 @@ class QAModel:
             if convo_context:
                 concatenated = convo_context + "\n\n" + concatenated
 
-        # 4) Truncate concatenated context to fit BERT maximum when combined with query
-        # Compute available tokens for context
-        query_token_count = len(self.tokenizer.tokenize(query))
-        max_context_tokens = self.MAX_BERT_TOKENS - query_token_count - self.RESERVED_TOKENS
-        if max_context_tokens < 1:
-            max_context_tokens = self.MAX_BERT_TOKENS - 2  # fallback
-
-        # Tokenize context and if too long, keep the LAST max_context_tokens tokens
-        context_ids = self.tokenizer.encode(concatenated, add_special_tokens=False)
-        if len(context_ids) > max_context_tokens:
-            # keep the tail (most recent / likely relevant), but you can choose head if you prefer
-            context_ids = context_ids[-max_context_tokens:]
-            context = self.tokenizer.decode(context_ids, clean_up_tokenization_spaces=True)
-        else:
-            context = concatenated
-
         llm_prompt = (
             "You are a helpful assistant. Answer ONLY using the information provided below. "
             "If the answer is not in the context, say: 'The document does not provide this information.'\n\n"
-            f"Context:\n{context}\n\n"
+            f"Context:\n{concatenated}\n\n"
             f"Question:\n{query}\n\n"
             "Answer:"
 

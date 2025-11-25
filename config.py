@@ -24,9 +24,7 @@ CONFIG = {
 
 }
 
-# -----------------------
 # Shared tokenizer / models
-# -----------------------
 TOKENIZER = AutoTokenizer.from_pretrained(CONFIG["BERT_TOKENIZER"], use_fast=True)
 EMBEDDER = SentenceTransformer(CONFIG["EMBED_MODEL"])
 MLM_MODEL = BertForMaskedLM.from_pretrained(CONFIG["BERT_TOKENIZER"])
