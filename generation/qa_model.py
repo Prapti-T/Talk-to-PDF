@@ -1,22 +1,21 @@
-from config import TOKENIZER, QA_MODEL, CONFIG
+from config import TOKENIZER, CONFIG
 import torch
 import redis
 from retrieval.retriever import Retriever
 import ollama
+from typing import List
+import json
 
 class QAModel:
-    """Hybrid Extractive + Generative QA with Redis-based chat context using BERT + Ollama."""
+    """Generative QA with Redis-based chat context using Ollama."""
 
     def __init__(self, redis_enabled=True, ollama_model=CONFIG.get("OLLAMA_LLM_MODEL", "qwen2.5:0.5b")):
-        # BERT QA
         self.tokenizer = TOKENIZER
-        self.model = QA_MODEL
         self.retriever = Retriever()
 
         # Redis setup
         self.redis_enabled = redis_enabled
         if self.redis_enabled:
-            # Use .get with a default for safety, but rely on CONFIG for structure
             self.redis_client = redis.Redis(
                 host=CONFIG.get("REDIS_HOST", "localhost"),
                 port=CONFIG.get("REDIS_PORT", 6379),
@@ -27,93 +26,102 @@ class QAModel:
         # Ollama LLM
         self.ollama_model = ollama_model
 
+        # constants
+        self.MAX_BERT_TOKENS = 512
+        self.RESERVED_TOKENS = 4  # [CLS], [SEP], etc
+
     # Redis chat utilities
     def _save_conversation(self, session_id: str, user_input: str, answer: str):
         if self.redis_enabled:
-            self.redis_client.rpush(session_id, f"You: {user_input}")
-            self.redis_client.rpush(session_id, f"System: {answer}")
+            # Store as JSON objects for safe multi-turn retrieval
+            self.redis_client.rpush(session_id, json.dumps({"role": "user", "content": user_input}))
+            self.redis_client.rpush(session_id, json.dumps({"role": "system", "content": answer}))
 
     def _get_conversation_context(self, session_id: str, max_turns: int = 5) -> str:
         if self.redis_enabled:
-            history = self.redis_client.lrange(session_id, -max_turns * 2, -1)
-            return "\n".join(history) if history else ""
+            # Get last max_turns*2 messages as JSON
+            history_items = self.redis_client.lrange(session_id, -max_turns*2, -1)
+            context_texts = []
+            for item in history_items:
+                try:
+                    obj = json.loads(item)
+                    context_texts.append(f"{obj['role'].capitalize()}: {obj['content']}")
+                except (json.JSONDecodeError, KeyError):
+                    # fallback for any legacy plain-text entries
+                    context_texts.append(str(item))
+            return "\n".join(context_texts) if context_texts else ""
         return ""
 
-    # BertQA + Ollama hybrid
+    # Helpers
+    def _ensure_list(self, x) -> List[str]:
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            if len(x) > 0 and isinstance(x[0], list):
+                return x[0]
+            return list(x)
+        return [x]
+
+    # Main QA function
     def answer_question(self, query: str, session_id: str = None, top_k: int = 5) -> str:
-        top_chunks = self.retriever.retrieve(query, top_k=top_k)
-        
-        MAX_BERT_TOKENS = 512 
+        # 1) Retrieve top_k chunks (normalize return)
+        retrieved = self.retriever.retrieve(query, top_k=top_k)
+        top_chunks = self._ensure_list(retrieved)
 
-        query_tokens_count = len(self.tokenizer.tokenize(query))
-        
-        # We reserve 4 tokens for special separators: [CLS], [SEP] after query, and two [SEP] markers potentially used by the tokenizer for the context end.
-        RESERVED_TOKENS = 4 
-        max_context_length = MAX_BERT_TOKENS - query_tokens_count - RESERVED_TOKENS 
+        concatenated = "\n\n".join(top_chunks[:top_k])
 
-        concatenated_context = ""
-        current_token_count = 0
-        
-        # Iterate through all retrieved chunks and add them until the token limit is hit
-        for chunk in top_chunks:
-            chunk_tokens = self.tokenizer.tokenize(chunk)
-            
-            if current_token_count + len(chunk_tokens) + 1 <= max_context_length:
-                concatenated_context += chunk + " "
-                current_token_count += len(chunk_tokens) + 1
-            else:
-                break 
-                
-        context = concatenated_context.strip() 
-        if not context:
-            context = "" 
-        
-
+        convo_context = ""
         if session_id:
             convo_context = self._get_conversation_context(session_id)
             if convo_context:
-                context = convo_context + "\n" + context
+                concatenated = convo_context + "\n\n" + concatenated
 
-        inputs = self.tokenizer.encode_plus(query, context, return_tensors="pt")
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-        
-        # Extractive prediction
-        start_idx = torch.argmax(outputs.start_logits)
-        end_idx = torch.argmax(outputs.end_logits) + 1
-        answer_tokens = inputs["input_ids"][0][start_idx:end_idx]
-        bert_answer = self.tokenizer.decode(answer_tokens, clean_up_tokenization_spaces=True)
+        # 4) Truncate concatenated context to fit BERT maximum when combined with query
+        # Compute available tokens for context
+        query_token_count = len(self.tokenizer.tokenize(query))
+        max_context_tokens = self.MAX_BERT_TOKENS - query_token_count - self.RESERVED_TOKENS
+        if max_context_tokens < 1:
+            max_context_tokens = self.MAX_BERT_TOKENS - 2  # fallback
 
-        # Ollama LLM for fluent answer
-        llm_prompt = f"""You are a helpful assistant. Use the context below to answer the question.
+        # Tokenize context and if too long, keep the LAST max_context_tokens tokens
+        context_ids = self.tokenizer.encode(concatenated, add_special_tokens=False)
+        if len(context_ids) > max_context_tokens:
+            # keep the tail (most recent / likely relevant), but you can choose head if you prefer
+            context_ids = context_ids[-max_context_tokens:]
+            context = self.tokenizer.decode(context_ids, clean_up_tokenization_spaces=True)
+        else:
+            context = concatenated
 
-Context:
-{context}
+        llm_prompt = (
+            "You are a helpful assistant. Answer ONLY using the information provided below. "
+            "If the answer is not in the context, say: 'The document does not provide this information.'\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question:\n{query}\n\n"
+            "Answer:"
 
-BERT Extractive Answer:
-{bert_answer}
-
-Question:
-{query}
-
-Answer:"""
-
-        # Extract the response content from the nested dictionary structure.
+)
         try:
             llm_response = ollama.chat(
-                model=self.ollama_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": llm_prompt 
-                    }
-                ]
+                messages=[{"role": "user", "content": llm_prompt}],
+                model=self.ollama_model
             )
-            final_answer = llm_response['message']['content'].strip()
+            
+            final_answer = ""
+            if isinstance(llm_response, dict):
+                # Dictionary response: {'message': {'content': '...'}}
+                final_answer = llm_response.get("message", {}).get("content", "")
+            elif hasattr(llm_response, 'message') and hasattr(llm_response.message, 'content'):
+                final_answer = llm_response.message.content
+            elif hasattr(llm_response, 'content'):
+                final_answer = llm_response.content
+            else:
+                final_answer = f"Could not parse LLM response"
+            
+            final_answer = final_answer.strip() if final_answer else ""
+            
         except Exception as e:
             print(f"Ollama error: {e}")
-            final_answer = f"Could not generate a fluent answer. BERT's extractive answer was: {bert_answer}"
-
+            final_answer = f"Could not generate a fluent answer."
         if session_id:
             self._save_conversation(session_id, query, final_answer)
 

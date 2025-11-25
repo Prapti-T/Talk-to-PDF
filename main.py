@@ -29,7 +29,7 @@ class MLMRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     query: str
-    top_k: int = 1
+    top_k: int = 5
 
 retriever = Retriever()
 qa_model = QAModel()

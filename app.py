@@ -1,4 +1,3 @@
-# streamlit_app.py
 import streamlit as st
 import requests
 
@@ -23,7 +22,7 @@ if task == "Chat Mode (QA)":
                 payload = {
                     "query": user_input,
                     "session_id": st.session_state.session_id,
-                    "top_k": 1
+                    "top_k": 5
                 }
                 response = requests.post(f"{API_URL}/chat", json=payload)
                 response.raise_for_status()
@@ -39,8 +38,9 @@ if task == "Chat Mode (QA)":
     # Display conversation history
     st.subheader("Conversation History")
     for turn in st.session_state.history:
-        st.markdown(f"**You:** {turn['user']}")
-        st.markdown(f"**System:** {turn['system']}")
+        role = turn.get("role", "Unknown").capitalize()
+        content = turn.get("content", "")
+        st.markdown(f"**{role}:** {content}")
 
     # Clear chat button
     if st.button("Clear Chat"):

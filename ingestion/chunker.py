@@ -1,118 +1,88 @@
 from typing import List
-import re
 from config import TOKENIZER, CONFIG
+import re
 
 class MarkdownChunker:
-    """Semantic splitting of markdown text into blocks (headings, tables, lists, paragraphs), Token-aware chunking of these blocks based on MAX_TOKENS and sliding overlap"""
-
     def __init__(self):
         self.tokenizer = TOKENIZER
         self.max_tokens = CONFIG["CHUNK_TOKENS"]
         self.overlap = CONFIG["CHUNK_OVERLAP"]
 
-    def split_blocks(self, md_text: str) -> List[str]:
-        """Split markdown text into semantic blocks:
-        - headings (#, ##, ...)
-        - markdown tables (| ... |)
-        - bullet lists
-        - paragraphs
-        This is purely text-level, no tokenization happens here."""
-        lines = md_text.splitlines()
-        blocks = []
-        cur = []
-
-        def flush():
-            """Flush current buffer as a block if not empty."""
-            if cur:
-                text = "\n".join(cur).strip()
-                if text:
-                    blocks.append(text)
-                cur.clear()
-
-        for ln in lines:
-            stripped = ln.strip()
-            if stripped.startswith("#"):  # heading
-                flush()
-                blocks.append(stripped)
-            elif '|' in ln and re.search(r'\|.*\|', ln):  # table line
-                cur.append(ln)
-            elif stripped.startswith(("-", "*", "+", "•")):  # bullet list
-                cur.append(ln)
-            elif stripped == "":  # blank line → flush
-                flush()
-            else:
-                cur.append(ln)
-        flush()
-        return blocks
-
-    def chunk_block(self, block: str) -> List[str]:
-        """
-        - Convert block → token IDs using tokenizer
-        - If block smaller than MAX_TOKENS, return as-is
-        - Otherwise, split by sentence, if sentence too long, hard-split by tokens with sliding overlap
-        """
-
-        token_ids = self.tokenizer.encode(block, add_special_tokens=False)
-
-        if len(token_ids) <= self.max_tokens:
-            return [block]
-
-        sentences = re.split(r'(?<=[.!?])\s+', block)
+    def chunk_tokens(self, token_ids: List[int]) -> List[List[int]]:
         chunks = []
-        cur_tokens = []
-        cur_text = ""
-
-        for sent in sentences:
-            sent_ids = self.tokenizer.encode(sent, add_special_tokens=False)
-
-            if len(cur_tokens) + len(sent_ids) <= self.max_tokens:
-                cur_tokens += sent_ids
-                cur_text += (" " if cur_text else "") + sent
-            else:
-                if cur_text:
-                    chunks.append(cur_text.strip())
-
-                if len(sent_ids) > self.max_tokens:
-                    start = 0
-                    while start < len(sent_ids):
-                        part_ids = sent_ids[start:start+self.max_tokens]
-                        part_text = self.tokenizer.decode(part_ids, clean_up_tokenization_spaces=True)
-                        chunks.append(part_text.strip())
-                        start += self.max_tokens - self.overlap
-                    cur_tokens = []
-                    cur_text = ""
-                else:
-                    cur_tokens = sent_ids.copy()
-                    cur_text = sent
-
-        if cur_text:
-            chunks.append(cur_text.strip())
-
+        start = 0
+        while start < len(token_ids):
+            end = min(start + self.max_tokens, len(token_ids))
+            chunks.append(token_ids[start:end])
+            start += self.max_tokens - self.overlap
         return chunks
 
+    def split_blocks(self, md_text: str) -> List[str]:
+        lines = md_text.split('\n')
+        blocks = []
+        cur_block = []
+        in_table = False
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Detect table lines
+            if '|' in line and re.search(r'\|\s*\S', line):
+                if not in_table:
+                    if cur_block:
+                        blocks.append('\n'.join(cur_block).strip())
+                        cur_block = []
+                    in_table = True
+                cur_block.append(line)
+            else:
+                if in_table:
+                    blocks.append('\n'.join(cur_block).strip())
+                    cur_block = []
+                    in_table = False
+                cur_block.append(line)
+
+        if cur_block:
+            blocks.append('\n'.join(cur_block).strip())
+        return blocks
+
     def markdown_to_chunks(self, md_text: str) -> List[str]:
-        """
-        - Split markdown → semantic blocks
-        - Chunk each block token-wise
-        - Ensure no chunk exceeds MAX_TOKENS using final token slicing pass
-        """
         blocks = self.split_blocks(md_text)
-        chunks = []
+        all_chunks = []
 
         for block in blocks:
-            chunks.extend(self.chunk_block(block))
+            if '|' in block:
+                rows = block.split('\n')
 
-        final_chunks = []
-        for c in chunks:
-            ids = self.tokenizer.encode(c, add_special_tokens=False)
-            if len(ids) <= self.max_tokens:
-                final_chunks.append(c)
+                header_tokens = []
+                start_idx = 0
+                if rows:
+                    first_cols = [c.strip() for c in rows[0].split('|')]
+                    if "" in first_cols and len(rows) > 1:
+                        header_rows = rows[:2]
+                        start_idx = 2
+                    else:
+                        header_rows = [rows[0]]
+                        start_idx = 1
+
+                    for hr in header_rows:
+                        header_tokens.extend(self.tokenizer.encode(hr, add_special_tokens=False))
+
+                # Process remaining rows
+                for row in rows[start_idx:]:
+                    row_tokens = self.tokenizer.encode(row, add_special_tokens=False)
+                    if len(header_tokens) + len(row_tokens) <= self.max_tokens:
+                        chunk_ids = header_tokens + row_tokens
+                        all_chunks.append(self.tokenizer.decode(chunk_ids, clean_up_tokenization_spaces=True).strip())
+                    else:
+                        start = 0
+                        while start < len(row_tokens):
+                            end = start + (self.max_tokens - len(header_tokens))
+                            chunk_ids = header_tokens + row_tokens[start:end]
+                            all_chunks.append(self.tokenizer.decode(chunk_ids, clean_up_tokenization_spaces=True).strip())
+                            start += self.max_tokens - self.overlap
             else:
-                start = 0
-                while start < len(ids):
-                    part = ids[start:start+self.max_tokens]
-                    part_text = self.tokenizer.decode(part, clean_up_tokenization_spaces=True).strip()
-                    final_chunks.append(part_text)
-                    start += self.max_tokens - self.overlap
+                block_tokens = self.tokenizer.encode(block, add_special_tokens=False)
+                for chunk_ids in self.chunk_tokens(block_tokens):
+                    all_chunks.append(self.tokenizer.decode(chunk_ids, clean_up_tokenization_spaces=True).strip())
 
-        return final_chunks
+        return all_chunks

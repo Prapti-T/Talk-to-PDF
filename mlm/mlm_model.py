@@ -1,4 +1,3 @@
-# mlm/mlm_model.py
 from config import TOKENIZER, MLM_MODEL
 import torch
 

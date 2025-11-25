@@ -13,6 +13,10 @@ class Retriever:
         """
         Embed query, query Pinecone, return top chunk texts as a list
         """
-        query_vector = self.embedder.encode([query])[0].tolist()
+        query_embedding = self.embedder.encode([query])[0]
+        
+        query_vector = query_embedding.tolist()
+        
         top_chunks = self.pc_client.query(query_vector, top_k=top_k)
-        return top_chunks  # just return the list of top chunk texts
+        
+        return top_chunks
